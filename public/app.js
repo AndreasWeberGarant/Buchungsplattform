@@ -34,7 +34,7 @@ async function api(url, payload) {
 
 function heading(label, object) {
   return node('header', { className: 'page-heading' }, title(label),
-    object ? para(object.title, 'object-name') : '', object ? para(object.meeting, 'muted') : '')
+    object ? para(object.title, 'object-name') : '')
 }
 
 function field(label, properties) {
@@ -105,7 +105,9 @@ function confirmed(result) {
   const link = new URL(result.manage, location.origin)
   app.replaceChildren(heading('Termin gebucht', result.object), section(
     node('h2', {}, result.when),
-    para('Die Bestätigung mit Adresse und Treffpunkt wird Ihnen per E-Mail zugesandt.'),
+    para(result.manualCustomerMail
+      ? 'Andreas Weber sendet Ihnen Adresse und Treffpunkt separat per E-Mail.'
+      : 'Die Bestätigung mit Adresse und Treffpunkt wird Ihnen per E-Mail zugesandt.'),
     para('Mit dem persönlichen Link können Sie bis zwei Stunden vor Beginn umbuchen oder absagen.'),
     shareLink(link, 'Persönlicher Terminlink'),
     node('a', { href: link.href, className: 'text-link' }, 'Termin verwalten'),
@@ -172,7 +174,9 @@ async function bookingPage(id) {
   renderActions()
   app.replaceChildren(heading('Besichtigung buchen', data.object),
     section(node('h2', {}, 'Termin auswählen'),
-      para('Nach der Buchung erhalten Sie eine separate E-Mail mit Bestätigung, genauer Adresse und Treffpunkt.'), selection),
+      para(data.manualCustomerMail
+        ? 'Nach der Buchung sendet Ihnen Andreas Weber eine separate E-Mail mit genauer Adresse und Treffpunkt.'
+        : 'Nach der Buchung erhalten Sie eine separate E-Mail mit Bestätigung, genauer Adresse und Treffpunkt.'), selection),
     actions)
 }
 
@@ -243,6 +247,53 @@ function minutes(value) {
   return hour * 60 + minute
 }
 
+function bookingRow(booking) {
+  const row = node('li', {}, node('strong', {}, booking.time + ' Uhr'),
+    ' · ' + booking.first + ' ' + booking.last + ' · ' + booking.phone)
+  if (!booking.manualMail) return row
+  const { subject, relativeLink } = booking.manualMail
+  const body = relativeLink
+    ? booking.manualMail.body.replace(relativeLink, new URL(relativeLink, location.origin).href)
+    : booking.manualMail.body
+  const recipient = encodeURIComponent(booking.email)
+  const href = 'mailto:' + recipient + '?subject=' + encodeURIComponent(subject) + '&body=' + encodeURIComponent(body)
+  const draft = node('textarea', { readOnly: true, value: body, rows: 7 })
+  row.append(node('details', {},
+    node('summary', {}, 'Kundenmail vorbereiten'),
+    para('An: ' + booking.email),
+    para('Betreff: ' + subject),
+    node('label', {}, 'Mailtext', draft),
+    node('a', { href, className: 'text-link' }, 'Im Mailprogramm öffnen')))
+  return row
+}
+
+function bookingOverview(bookings) {
+  const statuses = { upcoming: 'Anstehend', past: 'Vergangen', canceled: 'Abgesagt' }
+  const upcoming = bookings.filter(booking => booking.status === 'upcoming')
+  const history = bookings.filter(booking => booking.status !== 'upcoming').reverse()
+  const headline = node('h2', {}, 'Buchungen im Überblick')
+  function table(rows, label) {
+    const container = node('div', { className: 'table-scroll', tabIndex: 0 },
+      node('table', { className: 'booking-table' },
+        node('thead', {}, node('tr', {}, ['Termin', 'Objekt', 'Interessent', 'Telefon', 'Status']
+          .map(text => node('th', { scope: 'col' }, text)))),
+        node('tbody', {}, rows.map(booking => node('tr', {},
+          node('td', {}, node('strong', {}, booking.time + ' Uhr'), node('small', {}, dayLabel(booking.day))),
+          node('td', {}, booking.title),
+          node('td', {}, booking.first + ' ' + booking.last),
+          node('td', {}, node('a', { href: 'tel:' + booking.phone.replace(/[^+\d]/g, '') }, booking.phone)),
+          node('td', {}, node('span', { className: 'booking-status ' + booking.status }, statuses[booking.status])))))))
+    container.setAttribute('aria-label', label)
+    container.setAttribute('role', 'region')
+    return container
+  }
+  return section(headline,
+    upcoming.length ? table(upcoming, 'Anstehende Buchungen') : para('Keine anstehenden Buchungen.', 'muted'),
+    ...(history.length ? [node('details', { className: 'booking-history' },
+      node('summary', {}, 'Vergangene und abgesagte Buchungen (' + history.length + ')'),
+      table(history, 'Vergangene und abgesagte Buchungen'))] : []))
+}
+
 async function adminPage() {
   const data = await api('/api/admin')
   const objectForm = form([
@@ -266,7 +317,7 @@ async function adminPage() {
       const [windowId, at] = values.slot.split(':')
       return api('/api/admin/bookings', { ...values, objectId: object.id, windowId, at: Number(at) })
     }
-    const manual = options.length && data.mailConfigured ? node('details', { className: 'admin-window' },
+    const manual = options.length ? node('details', { className: 'admin-window' },
       node('summary', {}, 'Interessenten einbuchen'),
       form([select('Freier Termin', 'slot', options), ...contactFields(true),
         node('input', { type: 'hidden', name: 'waitlistId' })], 'Buchung speichern',
@@ -301,13 +352,15 @@ async function adminPage() {
         node('ul', { className: 'appointments' }, requests))] : []),
       object.windows.map(window => node('div', { className: 'admin-window' },
         node('h3', {}, dayLabel(window.day)), para(window.range + ' · ' + window.duration + ' Minuten pro Termin', 'muted'),
-        window.bookings.length ? node('ul', { className: 'appointments' }, window.bookings.map(booking =>
-          node('li', {}, node('strong', {}, booking.time + ' Uhr'), ' · ' + booking.first + ' ' + booking.last + ' · ' + booking.phone)))
+        window.bookings.length ? node('ul', { className: 'appointments' }, window.bookings.map(bookingRow))
           : para('Noch keine Buchungen.', 'muted'))))
   })
   app.replaceChildren(heading('Besichtigungen verwalten'),
+    ...(data.manualCustomerMail ? [para('Kundenbestätigungen verschickst du selbst aus der jeweiligen Buchung.', 'banner')] : []),
     ...(data.mailConfigured ? (data.pending ? [para(data.pending + ' E-Mail(s) warten auf den Versand.', 'banner')] : [])
-      : [para('Der E-Mail-Versand ist noch nicht eingerichtet.', 'banner')]),
+      : [para('Benachrichtigungen warten auf die Einrichtung des Mailversands. Fehlende Einstellungen: ' +
+        (data.mailMissing ?? []).join(', '), 'banner')]),
+    bookingOverview(data.bookingOverview ?? []),
     node('div', { className: 'columns admin-forms' }, section(node('h2', {}, 'Objekt anlegen'), objectForm),
       ...(data.objects.length ? [section(node('h2', {}, 'Zeitfenster anlegen'), windowForm)] : [])), ...objects)
 }

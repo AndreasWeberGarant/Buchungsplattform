@@ -4,7 +4,12 @@ import { DatabaseSync } from 'node:sqlite'
 import { mkdirSync, readFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 
-const { ADMIN_PASSWORD, RESEND_API_KEY, MAIL_FROM, MAIL_TO, PUBLIC_ORIGIN } = process.env
+const { ADMIN_PASSWORD, RESEND_API_KEY, MAIL_FROM, MAIL_TO, PUBLIC_ORIGIN, CUSTOMER_MAIL_MODE = 'auto' } = process.env
+if (!['auto', 'manual'].includes(CUSTOMER_MAIL_MODE)) throw new Error('CUSTOMER_MAIL_MODE muss auto oder manual sein.')
+const mailMissing = Object.entries({ RESEND_API_KEY, MAIL_FROM, MAIL_TO, PUBLIC_ORIGIN })
+  .filter(([, value]) => !value?.trim()).map(([name]) => name)
+const mailConfigured = mailMissing.length === 0
+const manualCustomerMail = CUSTOMER_MAIL_MODE === 'manual' || !mailConfigured
 if (!ADMIN_PASSWORD || ADMIN_PASSWORD.length < 16) throw new Error('ADMIN_PASSWORD braucht mindestens 16 Zeichen.')
 const dbPath = process.env.DB_PATH || './data/bookings.sqlite'
 mkdirSync(dirname(dbPath), { recursive: true })
@@ -33,7 +38,7 @@ db.exec(`
     created INTEGER NOT NULL, closed INTEGER NOT NULL DEFAULT 0
   );
 `)
-for (const [table, column] of [['bookings', 'email'], ['outbox', 'recipient']]) {
+for (const [table, column] of [['bookings', 'email'], ['bookings', 'manual_mail'], ['outbox', 'recipient']]) {
   if (!db.prepare(`PRAGMA table_info(${table})`).all().some(entry => entry.name === column)) {
     db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} TEXT`)
   }
@@ -107,7 +112,7 @@ function availability(objectId, excluded) {
   const windows = all('SELECT * FROM windows WHERE object_id = ? ORDER BY day, start', objectId)
     .map(window => ({ id: window.id, day: window.day, duration: window.duration, slots: slots(window, excluded, Boolean(excluded)) }))
     .filter(window => window.slots.length)
-  return { object: publicObject(object), windows }
+  return { object: publicObject(object), windows, manualCustomerMail }
 }
 
 function destination(body, objectId, excluded) {
@@ -133,7 +138,7 @@ function details(booking) {
   const window = windowById(booking.window_id)
   const active = !booking.canceled && inFuture(window.day, booking.start)
   return { object: publicObject(objectById(window.object_id)), when: timestamp(window, booking.start),
-    active, editable: active && changeAllowed(window.day, booking.start), canceled: Boolean(booking.canceled) }
+    active, editable: active && changeAllowed(window.day, booking.start), canceled: Boolean(booking.canceled), manualCustomerMail }
 }
 
 function notify(subject, booking, previous) {
@@ -151,23 +156,31 @@ function queueMail(subject, lines, recipient = null) {
 function customerMail(booking, token, moved = false) {
   if (!booking.email) return
   const { object, when } = details(booking)
-  const manage = new URL(`/termin#${token}`, PUBLIC_ORIGIN)
-  queueMail(moved ? 'Ihr neuer Besichtigungstermin' : 'Ihr Besichtigungstermin ist bestätigt', [
+  const managePath = `/termin#${token}`
+  const subject = moved ? 'Ihr neuer Besichtigungstermin' : 'Ihr Besichtigungstermin ist bestätigt'
+  const lines = [
     'Guten Tag ' + booking.first + ' ' + booking.last + ',', '',
     object.title, when, 'Adresse und Treffpunkt: ' + objectById(object.id).meeting, '',
-    'Sie können bis zwei Stunden vor Beginn umbuchen oder absagen:', manage.href,
+    'Sie können bis zwei Stunden vor Beginn umbuchen oder absagen:',
+    PUBLIC_ORIGIN ? new URL(managePath, PUBLIC_ORIGIN).href : managePath,
     '', 'Andreas Weber · GARANT Immobilien',
-  ], booking.email)
+  ]
+  if (manualCustomerMail) {
+    run('UPDATE bookings SET manual_mail = ? WHERE id = ?',
+      JSON.stringify({ subject, body: lines.join('\n'), relativeLink: PUBLIC_ORIGIN ? null : managePath }), booking.id)
+  } else {
+    queueMail(subject, lines, booking.email)
+  }
 }
 
-const mailConfigured = Boolean(RESEND_API_KEY && MAIL_FROM && MAIL_TO && PUBLIC_ORIGIN)
 if (PUBLIC_ORIGIN && !/^https?:$/.test(new URL(PUBLIC_ORIGIN).protocol)) throw new Error('PUBLIC_ORIGIN muss eine HTTP(S)-Adresse sein.')
 let sending = false
 async function sendPending() {
   if (sending || !mailConfigured) return
   sending = true
   try {
-    for (const item of all('SELECT * FROM outbox WHERE sent = 0 AND next <= ? ORDER BY next LIMIT 10', Date.now())) {
+    for (const item of all('SELECT * FROM outbox WHERE sent = 0 AND (? = 0 OR recipient IS NULL) AND next <= ? ORDER BY next LIMIT 10',
+      Number(manualCustomerMail), Date.now())) {
       try {
         const response = await fetch('https://api.resend.com/emails', {
           method: 'POST', signal: AbortSignal.timeout(8000),
@@ -235,7 +248,7 @@ function changeBooking(token, action, body) {
     const old = details(booking)
     if (!old.editable) fail(409, 'Online-Änderungen sind bis zwei Stunden vor Beginn möglich.')
     if (action === 'cancel') {
-      run('UPDATE bookings SET canceled = 1 WHERE id = ?', booking.id)
+      run('UPDATE bookings SET canceled = 1, manual_mail = NULL WHERE id = ?', booking.id)
       booking.canceled = 1
       notify('Besichtigung abgesagt', booking)
     } else {
@@ -262,7 +275,6 @@ function contact(body) {
 }
 
 function createBooking(body, objectId, waitlistId) {
-  if (!mailConfigured) fail(503, 'Der E-Mail-Versand für Buchungen ist derzeit nicht eingerichtet.')
   return transaction(() => {
     const window = destination(body, objectId)
     const token = randomBytes(32).toString('base64url')
@@ -298,17 +310,30 @@ async function api(req, path) {
   let match
   if (req.method === 'GET' && path === '/api/admin') {
     return {
+      bookingOverview: all(`
+        SELECT windows.day, bookings.start, bookings.first, bookings.last, bookings.phone,
+               bookings.canceled, objects.title
+        FROM bookings
+        JOIN windows ON windows.id = bookings.window_id
+        JOIN objects ON objects.id = windows.object_id
+        ORDER BY windows.day, bookings.start, objects.title, bookings.id
+      `).map(({ start, canceled, ...booking }) => ({
+        ...booking, time: time(start),
+        status: canceled ? 'canceled' : inFuture(booking.day, start) ? 'upcoming' : 'past',
+      })),
       objects: all('SELECT * FROM objects ORDER BY rowid DESC').map(object => ({
         ...object,
         waitlist: all('SELECT id, first, last, phone, preference FROM waitlist WHERE object_id = ? AND closed = 0 ORDER BY created', object.id),
         windows: all('SELECT * FROM windows WHERE object_id = ? ORDER BY day, start', object.id).map(window => ({
           ...window, range: `${time(window.start)}–${time(window.end)} Uhr`,
           free: slots(window).filter(slot => slot.state === 'free'),
-          bookings: all('SELECT id, first, last, phone, email, start FROM bookings WHERE window_id = ? AND canceled = 0 ORDER BY start', window.id)
-            .map(booking => ({ ...booking, time: time(booking.start) })),
+          bookings: all('SELECT id, first, last, phone, email, start, manual_mail FROM bookings WHERE window_id = ? AND canceled = 0 ORDER BY start', window.id)
+            .map(({ manual_mail, ...booking }) => ({ ...booking, time: time(booking.start),
+              manualMail: manual_mail ? JSON.parse(manual_mail) : null })),
         })),
       })),
-      mailConfigured, pending: get('SELECT count(*) AS count FROM outbox WHERE sent = 0').count,
+      mailConfigured, manualCustomerMail, mailMissing,
+      pending: get('SELECT count(*) AS count FROM outbox WHERE sent = 0 AND (? = 0 OR recipient IS NULL)', Number(manualCustomerMail)).count,
     }
   }
   if (req.method === 'GET' && (match = path.match(/^\/api\/objects\/([\w-]+)$/))) return availability(match[1])

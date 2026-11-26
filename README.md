@@ -23,9 +23,12 @@ RESEND_API_KEY=hier-den-api-schluessel-eintragen
 MAIL_FROM=Besichtigungen <termine@deine-verifizierte-domain.de>
 MAIL_TO=deine-empfaengeradresse@example.de
 PUBLIC_ORIGIN=https://deine-buchungsdomain.de
+CUSTOMER_MAIL_MODE=auto
 ```
 
 Für den Versand einen Resend-API-Schlüssel mit Sendeberechtigung und eine dort eingerichtete Absenderdomain verwenden. `PUBLIC_ORIGIN` ist die öffentliche Adresse der App, beispielsweise die vom Hoster bereitgestellte HTTPS-Adresse. Die Plattform nutzt sie für die persönlichen Terminlinks in den Kundenmails. Bei einem Domainwechsel den Wert aktualisieren. Die Verwaltung zeigt wartende Nachrichten an. Vor dem Versenden echter Buchungslinks eine Testbuchung samt Umbuchung und Absage durchführen und beide Posteingänge prüfen.
+
+Mit `CUSTOMER_MAIL_MODE=manual` bereitet die App die Kundenbestätigung nur im Adminbereich vor. Die Benachrichtigungen an `MAIL_TO` werden weiterhin automatisch verschickt. Fehlt die Mailkonfiguration, nimmt die App Buchungen weiterhin an und hält die Benachrichtigungen für dich bis zur Einrichtung zurück. Die Kundenbestätigung steht dann im Adminbereich bereit. Zum Testen ohne eigene Domain kann `MAIL_FROM=onboarding@resend.dev` verwendet werden. `MAIL_TO` muss dann die genaue E-Mail-Adresse des Resend-Kontos sein. Für den regulären Versand mit Resend eine verifizierte Absenderdomain verwenden. Die Buchungsseite selbst kann unabhängig davon unter der HTTPS-Adresse des Hosters bleiben.
 
 ## Benutzen
 
