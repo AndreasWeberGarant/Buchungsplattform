@@ -108,9 +108,8 @@ function confirmed(result) {
     para(result.manualCustomerMail
       ? 'Andreas Weber sendet Ihnen Adresse und Treffpunkt separat per E-Mail.'
       : 'Die Bestätigung mit Adresse und Treffpunkt wird Ihnen per E-Mail zugesandt.'),
-    para('Mit dem persönlichen Link können Sie bis zwei Stunden vor Beginn umbuchen oder absagen.'),
-    shareLink(link, 'Persönlicher Terminlink'),
-    node('a', { href: link.href, className: 'text-link' }, 'Termin verwalten'),
+    para('Sie können den Termin bis zwei Stunden vor Beginn absagen oder umbuchen.'),
+    node('a', { href: link.href, className: 'text-link cancel-link' }, 'Termin absagen'),
   ))
 }
 

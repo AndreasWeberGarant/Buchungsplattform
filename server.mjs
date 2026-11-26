@@ -367,6 +367,7 @@ async function api(req, path) {
 }
 
 const assets = new Map([
+  ['/andreas-weber.png', ['image/png', readFileSync(new URL('./public/andreas-weber.png', import.meta.url))]],
   ['/app.js', ['text/javascript; charset=utf-8', readFileSync(new URL('./public/app.js', import.meta.url))]],
   ['/style.css', ['text/css; charset=utf-8', readFileSync(new URL('./public/style.css', import.meta.url))]],
 ])
