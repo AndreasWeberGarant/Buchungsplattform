@@ -33,9 +33,11 @@ Mit `CUSTOMER_MAIL_MODE=manual` bereitet die App die Kundenbestätigung nur im A
 ## Benutzen
 
 1. `/admin` öffnen und als **admin** mit dem gesetzten Passwort anmelden.
-2. Einen öffentlichen Objektnamen ohne Adresse und separat die genaue Adresse samt Treffpunkt anlegen. Ein Datum mit Start, Ende und 30 oder 45 Minuten pro Termin hinterlegen.
+2. Einen öffentlichen Objektnamen ohne Adresse anlegen. Ein Datum mit Start, Ende und 30 oder 45 Minuten pro Termin hinterlegen.
 3. Den Buchungslink des Objekts kopieren und an Interessenten schicken. Der Link enthält eine zufällige Kennung und kann weitergegeben werden.
-4. Nach der Buchung oder Umbuchung erhalten Interessenten eine Bestätigungsmail mit genauer Adresse, Treffpunkt und persönlichem Terminlink. Sie können den Termin bis zwei Stunden vor Beginn online ändern. Die Verwaltung erhält eine E-Mail zu Buchungen, Umbuchungen, Absagen und neuen Vormerkungen.
+4. Die Bestätigung enthält den persönlichen Terminlink. Bei manuellem Versand den Treffpunkt bei Bedarf zur Kundenmail ergänzen. Interessenten können den Termin bis zwei Stunden vor Beginn online ändern. Die Verwaltung erhält eine E-Mail zu Buchungen, Umbuchungen, Absagen und neuen Vormerkungen.
 5. Über „Interessenten einbuchen“ kannst du freie Termine selbst vergeben. Gibt es keinen buchbaren Termin, können Interessenten sich mit Telefonnummer und Wunschzeit vormerken lassen. Du entscheidest, wen du anrufst und einbuchst.
 
 Das 15-Minuten-Raster gilt je Zeitfenster für die erste Buchung. Danach sind nur direkt angrenzende Startzeiten verfügbar. Eine buchbare Lücke durch eine Absage hat Vorrang vor neuen Randterminen. Bei einer Umbuchung wird die aktuelle Buchung bei der Berechnung ausgenommen und bleibt bis zur erfolgreichen Auswahl reserviert. Zeitangaben gelten für Deutschland (`Europe/Berlin`).
+
+Gebuchte Termine blockieren ihre gesamte Dauer für alle Objekte am jeweiligen Tag. Besichtigungsfenster unterschiedlicher Objekte können sich überschneiden. Die App prüft den Konflikt beim Anzeigen, Buchen und Umbuchen. Interessenten können freiwillig Anmerkungen hinterlassen. Diese erscheinen in der Verwaltung und in deiner Benachrichtigung.

@@ -28,6 +28,7 @@ db.exec(`
     start INTEGER NOT NULL, first TEXT NOT NULL, last TEXT NOT NULL, phone TEXT NOT NULL, canceled INTEGER NOT NULL DEFAULT 0
   );
   CREATE UNIQUE INDEX IF NOT EXISTS unique_active_slot ON bookings(window_id, start) WHERE canceled = 0;
+  CREATE INDEX IF NOT EXISTS windows_by_day ON windows(day);
   CREATE TABLE IF NOT EXISTS outbox (
     id TEXT PRIMARY KEY, subject TEXT NOT NULL, body TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
     next INTEGER NOT NULL DEFAULT 0, sent INTEGER NOT NULL DEFAULT 0
@@ -38,7 +39,8 @@ db.exec(`
     created INTEGER NOT NULL, closed INTEGER NOT NULL DEFAULT 0
   );
 `)
-for (const [table, column] of [['bookings', 'email'], ['bookings', 'manual_mail'], ['outbox', 'recipient']]) {
+for (const [table, column] of [['bookings', 'email'], ['bookings', 'manual_mail'],
+  ['bookings', 'note'], ['outbox', 'recipient']]) {
   if (!db.prepare(`PRAGMA table_info(${table})`).all().some(entry => entry.name === column)) {
     db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} TEXT`)
   }
@@ -83,24 +85,31 @@ function transaction(work) {
   }
 }
 
-function slots(window, excluded, moving = false) {
+function slots(window, excluded, moving = false, showWholeWindow = false) {
   const { id, day, start, end, duration } = window
-  const occupied = all('SELECT id, start FROM bookings WHERE window_id = ? AND canceled = 0 ORDER BY start', id)
-    .filter(booking => booking.id !== excluded)
-    .map(booking => booking.start)
+  const dayBookings = all(`
+    SELECT bookings.id, bookings.window_id, bookings.start, windows.duration
+    FROM bookings JOIN windows ON windows.id = bookings.window_id
+    WHERE windows.day = ? AND bookings.canceled = 0
+    ORDER BY bookings.start
+  `, day).filter(booking => booking.id !== excluded)
+  const occupied = dayBookings.filter(booking => booking.window_id === id).map(booking => booking.start)
+  const otherBookings = dayBookings.filter(booking => booking.window_id !== id)
+  const canBook = at => inFuture(day, at) && (!moving || changeAllowed(day, at)) &&
+    !otherBookings.some(booking => at < booking.start + booking.duration && booking.start < at + duration)
   const gaps = new Set()
   for (let i = 1; i < occupied.length; i++) {
     for (let at = occupied[i - 1] + duration; at + duration <= occupied[i]; at += duration) {
-      if (inFuture(day, at)) gaps.add(at)
+      if (canBook(at)) gaps.add(at)
     }
   }
   const edges = new Set([occupied[0] - duration, occupied.at(-1) + duration])
   const allowed = gaps.size ? gaps : edges
   const result = []
   for (let at = start; at + duration <= end; at += 15) {
-    if (!inFuture(day, at)) continue
+    if (!showWholeWindow && !inFuture(day, at)) continue
     const booked = occupied.includes(at)
-    const free = (!occupied.length || allowed.has(at)) && (!moving || changeAllowed(day, at))
+    const free = (!occupied.length || allowed.has(at)) && canBook(at)
     result.push({ at, time: time(at), state: booked ? 'booked' : free ? 'free' : 'blocked' })
   }
   return result
@@ -110,8 +119,13 @@ function availability(objectId, excluded) {
   const object = objectById(objectId)
   if (!object) fail(404, 'Dieser Buchungslink ist ungültig.')
   const windows = all('SELECT * FROM windows WHERE object_id = ? ORDER BY day, start', objectId)
-    .map(window => ({ id: window.id, day: window.day, duration: window.duration, slots: slots(window, excluded, Boolean(excluded)) }))
-    .filter(window => window.slots.length)
+    .filter(window => inFuture(window.day, window.end))
+    .map(window => ({
+      id: window.id, day: window.day, duration: window.duration, from: time(window.start), to: time(window.end),
+      before: window.start > 0 ? { from: time(Math.max(0, window.start - 60)), to: time(window.start) } : null,
+      after: window.end < 1440 ? { from: time(window.end), to: time(Math.min(1440, window.end + 30)) } : null,
+      slots: slots(window, excluded, Boolean(excluded), true),
+    }))
   return { object: publicObject(object), windows, manualCustomerMail }
 }
 
@@ -143,8 +157,9 @@ function details(booking) {
 
 function notify(subject, booking, previous) {
   const { object, when } = details(booking)
-  const lines = [object.title, when, previous && `Bisher: ${previous}`, objectById(object.id).meeting,
-    '', `${booking.first} ${booking.last}`, `Telefon: ${booking.phone}`, booking.email && `E-Mail: ${booking.email}`]
+  const lines = [object.title, when, previous && `Bisher: ${previous}`, objectById(object.id).meeting || null,
+    '', [booking.first, booking.last].filter(Boolean).join(' '), `Telefon: ${booking.phone}`, booking.email && `E-Mail: ${booking.email}`]
+  if (booking.note) lines.push('', 'Anmerkungen zur Buchung:', booking.note)
   queueMail(subject, lines.filter(line => line != null))
 }
 
@@ -156,11 +171,12 @@ function queueMail(subject, lines, recipient = null) {
 function customerMail(booking, token, moved = false) {
   if (!booking.email) return
   const { object, when } = details(booking)
+  const meeting = objectById(object.id).meeting
   const managePath = `/termin#${token}`
   const subject = moved ? 'Ihr neuer Besichtigungstermin' : 'Ihr Besichtigungstermin ist bestätigt'
   const lines = [
-    'Guten Tag ' + booking.first + ' ' + booking.last + ',', '',
-    object.title, when, 'Adresse und Treffpunkt: ' + objectById(object.id).meeting, '',
+    'Guten Tag ' + [booking.first, booking.last].filter(Boolean).join(' ') + ',', '',
+    object.title, when, meeting ? 'Adresse und Treffpunkt: ' + meeting : 'Den Treffpunkt teile ich Ihnen separat mit.', '',
     'Sie können bis zwei Stunden vor Beginn umbuchen oder absagen:',
     PUBLIC_ORIGIN ? new URL(managePath, PUBLIC_ORIGIN).href : managePath,
     '', 'Andreas Weber · GARANT Immobilien',
@@ -233,8 +249,8 @@ function adminWindow(body) {
   return transaction(() => {
     const objectId = String(body.objectId || '')
     if (!objectById(objectId)) fail(404, 'Objekt nicht gefunden.')
-    if (get('SELECT id FROM windows WHERE day = ? AND start < ? AND end > ?', day, end, start)) {
-      fail(409, 'Dieses Zeitfenster überschneidet sich mit einem bereits angelegten Besichtigungsfenster.')
+    if (get('SELECT id FROM windows WHERE object_id = ? AND day = ? AND start < ? AND end > ?', objectId, day, end, start)) {
+      fail(409, 'Dieses Objekt hat bereits ein Besichtigungsfenster, das sich mit der gewählten Zeit überschneidet.')
     }
     run('INSERT INTO windows VALUES (?, ?, ?, ?, ?, ?)', randomUUID(), objectId, day, start, end, duration)
     return { ok: true }
@@ -265,8 +281,9 @@ function changeBooking(token, action, body) {
   })
 }
 
-function contact(body) {
-  const first = value(body, 'first', 80)
+function contact(body, firstRequired = true) {
+  const first = !firstRequired && (body.first == null || (typeof body.first === 'string' && !body.first.trim()))
+    ? '' : value(body, 'first', 80)
   const last = value(body, 'last', 80)
   const phone = value(body, 'phone', 40)
   const digits = phone.replace(/\D/g, '').length
@@ -280,9 +297,13 @@ function createBooking(body, objectId, waitlistId) {
     const token = randomBytes(32).toString('base64url')
     const email = value(body, 'email', 254)
     if (!/^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/u.test(email)) fail(400, 'Bitte geben Sie eine gültige E-Mail-Adresse ein.')
-    const booking = { id: randomUUID(), window_id: window.id, start: body.at, ...contact(body), email }
-    run('INSERT INTO bookings (id, token, window_id, start, first, last, phone, email) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-      booking.id, tokenHash(token), window.id, body.at, booking.first, booking.last, booking.phone, booking.email)
+    if (body.note != null && (typeof body.note !== 'string' || body.note.length > 500 || body.note.includes('\x00'))) {
+      fail(400, 'Anmerkungen dürfen höchstens 500 Zeichen enthalten.')
+    }
+    const note = body.note?.replace(/\r\n?/g, '\n').trim() || null
+    const booking = { id: randomUUID(), window_id: window.id, start: body.at, ...contact(body, false), email, note }
+    run('INSERT INTO bookings (id, token, window_id, start, first, last, phone, email, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      booking.id, tokenHash(token), window.id, body.at, booking.first, booking.last, booking.phone, booking.email, booking.note)
     notify('Neue Besichtigungsbuchung', booking)
     customerMail(booking, token)
     if (waitlistId) run('UPDATE waitlist SET closed = 1 WHERE id = ? AND object_id = ?', waitlistId, objectId)
@@ -310,8 +331,9 @@ async function api(req, path) {
   let match
   if (req.method === 'GET' && path === '/api/admin') {
     return {
+      today: localClock.format(new Date()).split(' ')[0],
       bookingOverview: all(`
-        SELECT windows.day, bookings.start, bookings.first, bookings.last, bookings.phone,
+        SELECT windows.day, bookings.start, bookings.first, bookings.last, bookings.phone, bookings.note,
                bookings.canceled, objects.title
         FROM bookings
         JOIN windows ON windows.id = bookings.window_id
@@ -327,7 +349,7 @@ async function api(req, path) {
         windows: all('SELECT * FROM windows WHERE object_id = ? ORDER BY day, start', object.id).map(window => ({
           ...window, range: `${time(window.start)}–${time(window.end)} Uhr`,
           free: slots(window).filter(slot => slot.state === 'free'),
-          bookings: all('SELECT id, first, last, phone, email, start, manual_mail FROM bookings WHERE window_id = ? AND canceled = 0 ORDER BY start', window.id)
+          bookings: all('SELECT id, first, last, phone, email, start, manual_mail, note FROM bookings WHERE window_id = ? AND canceled = 0 ORDER BY start', window.id)
             .map(({ manual_mail, ...booking }) => ({ ...booking, time: time(booking.start),
               manualMail: manual_mail ? JSON.parse(manual_mail) : null })),
         })),
@@ -347,7 +369,8 @@ async function api(req, path) {
   if (req.method !== 'POST') fail(404, 'Seite nicht gefunden.')
   const body = await json(req)
   if (path === '/api/admin/objects') {
-    run('INSERT INTO objects VALUES (?, ?, ?)', randomUUID(), value(body, 'title', 120), value(body, 'meeting', 250))
+    const meeting = body.meeting ? value(body, 'meeting', 250) : ''
+    run('INSERT INTO objects VALUES (?, ?, ?)', randomUUID(), value(body, 'title', 120), meeting)
     return { ok: true }
   }
   if (path === '/api/admin/windows') return adminWindow(body)
@@ -367,6 +390,7 @@ async function api(req, path) {
 }
 
 const assets = new Map([
+  ['/garant-logo.svg', ['image/svg+xml; charset=utf-8', readFileSync(new URL('./public/garant-logo.svg', import.meta.url))]],
   ['/andreas-weber.png', ['image/png', readFileSync(new URL('./public/andreas-weber.png', import.meta.url))]],
   ['/app.js', ['text/javascript; charset=utf-8', readFileSync(new URL('./public/app.js', import.meta.url))]],
   ['/style.css', ['text/css; charset=utf-8', readFileSync(new URL('./public/style.css', import.meta.url))]],

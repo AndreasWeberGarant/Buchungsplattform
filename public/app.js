@@ -39,11 +39,17 @@ function heading(label, object) {
 
 function field(label, properties) {
   const input = node('input', { required: true, ...properties })
-  return node('label', {}, node('span', {}, label), input)
+  return node('label', {}, fieldLabel(label, input.required), input)
+}
+
+function fieldLabel(label, required) {
+  const marker = node('span', { className: 'required-marker' }, ' *')
+  marker.setAttribute('aria-hidden', 'true')
+  return node('span', {}, label, required ? marker : '')
 }
 
 function select(label, name, options) {
-  return node('label', {}, node('span', {}, label), node('select', { name, required: true },
+  return node('label', {}, fieldLabel(label, true), node('select', { name, required: true },
     options.map(([value, label]) => node('option', { value }, label))))
 }
 
@@ -70,20 +76,32 @@ function form(fields, label, action, onSuccess, onConflict) {
 function picker(windows, current, onPick, selected) {
   if (!windows.length) return para('Derzeit sind keine kommenden Termine eingetragen.', 'muted')
   const labels = { free: 'Frei', booked: 'Belegt', blocked: 'Nicht verfügbar' }
+  const edge = range => range ? node('div', { className: 'slot booked slot-edge' },
+    node('strong', {}, range.from + '–' + range.to),
+    node('span', {}, 'Belegt · außerhalb des Zeitfensters')) : ''
   const bookable = windows.some(window => window.slots.some(slot =>
     slot.state === 'free' && (window.id !== current?.windowId || slot.at !== current.at)))
-  return node('div', { className: 'days' }, bookable ? '' : para('Derzeit ist kein weiterer Termin buchbar.', 'muted'), windows.map(window =>
-    node('div', {}, node('h3', {}, dayLabel(window.day)), para(window.duration + ' Minuten', 'muted duration'),
-      node('div', { className: 'slot-grid' }, window.slots.map(slot => {
-        const isCurrent = window.id === current?.windowId && slot.at === current.at
-        const picked = window.id === selected?.windowId && slot.at === selected.at
-        const control = button('', () => onPick({ windowId: window.id, at: slot.at, label: dayLabel(window.day) + ', ' + slot.time + ' Uhr' }),
-          'slot ' + slot.state)
-        control.disabled = isCurrent || slot.state !== 'free'
-        control.setAttribute('aria-pressed', String(picked))
-        control.append(node('strong', {}, slot.time), node('span', {}, isCurrent ? 'Ihr Termin' : labels[slot.state]))
-        return control
-      })))))
+  const days = windows.map(window => {
+    const range = window.from && window.to ? window.from + '–' + window.to + ' Uhr' : ''
+    const controls = window.slots.map(slot => {
+      const isCurrent = window.id === current?.windowId && slot.at === current.at
+      const picked = window.id === selected?.windowId && slot.at === selected.at
+      const control = button('', () => onPick({ windowId: window.id, at: slot.at, label: dayLabel(window.day) + ', ' + slot.time + ' Uhr' }),
+        'slot ' + slot.state)
+      control.disabled = isCurrent || slot.state !== 'free'
+      control.setAttribute('aria-pressed', String(picked))
+      control.append(node('strong', {}, slot.time), node('span', {}, isCurrent ? 'Ihr Termin' : labels[slot.state]))
+      return control
+    })
+    return node('div', {}, node('h3', {}, dayLabel(window.day)),
+      range ? para(range, 'muted duration') : '',
+      para('Geplante Termindauer: ' + window.duration + ' Minuten', 'muted duration'),
+      node('div', { className: 'slot-grid' }, edge(window.before), controls, edge(window.after)))
+  })
+  return node('div', {}, bookable ? '' : para('Derzeit ist kein weiterer Termin buchbar.', 'muted'),
+    node('div', { className: 'days' }, days),
+    node('ul', { className: 'slot-legend', 'ariaLabel': 'Legende' },
+      ...Object.entries(labels).map(([state, label]) => node('li', { className: state }, label))))
 }
 
 function shareLink(url, label) {
@@ -106,8 +124,8 @@ function confirmed(result) {
   app.replaceChildren(heading('Termin gebucht', result.object), section(
     node('h2', {}, result.when),
     para(result.manualCustomerMail
-      ? 'Andreas Weber sendet Ihnen Adresse und Treffpunkt separat per E-Mail.'
-      : 'Die Bestätigung mit Adresse und Treffpunkt wird Ihnen per E-Mail zugesandt.'),
+      ? 'Andreas Weber meldet sich per E-Mail mit den Details zur Besichtigung.'
+      : 'Sie erhalten eine Bestätigung per E-Mail.'),
     para('Sie können den Termin bis zwei Stunden vor Beginn absagen oder umbuchen.'),
     node('a', { href: link.href, className: 'text-link cancel-link' }, 'Termin absagen'),
   ))
@@ -115,11 +133,16 @@ function confirmed(result) {
 
 function contactFields(withEmail) {
   return [
-    node('div', { className: 'columns' }, field('Vorname', { name: 'first', autocomplete: 'given-name', maxLength: 80 }),
+    node('div', { className: 'columns' }, field(withEmail ? 'Vorname (optional)' : 'Vorname',
+      { name: 'first', required: !withEmail, autocomplete: 'given-name', maxLength: 80 }),
       field('Nachname', { name: 'last', autocomplete: 'family-name', maxLength: 80 })),
     field('Telefonnummer', { name: 'phone', type: 'tel', autocomplete: 'tel', maxLength: 40 }),
     ...(withEmail ? [field('E-Mail-Adresse', { name: 'email', type: 'email', autocomplete: 'email', maxLength: 254 })] : []),
   ]
+}
+
+function noteField() {
+  return node('label', {}, 'Anmerkungen (optional)', node('textarea', { name: 'note', rows: 3, maxLength: 500 }))
 }
 
 async function bookingPage(id) {
@@ -129,7 +152,7 @@ async function bookingPage(id) {
   const selection = node('div')
   const actions = node('div')
   const selectionText = para('Bitte wählen Sie zuerst einen freien Termin.', 'muted')
-  const bookingForm = form(contactFields(true), 'Termin verbindlich buchen', values => {
+  const bookingForm = form([...contactFields(true), noteField()], 'Termin verbindlich buchen', values => {
     if (!selected) throw new Error('Bitte wählen Sie zuerst einen freien Termin.')
     return api(endpoint + '/book', { ...values, ...selected })
   }, confirmed, async () => {
@@ -139,7 +162,8 @@ async function bookingPage(id) {
     renderPicker(false)
     renderActions()
   })
-  const contactSection = section(node('h2', {}, 'Ihre Kontaktdaten'), selectionText, bookingForm)
+  const contactSection = section(node('h2', {}, 'Ihre Kontaktdaten'), selectionText,
+    para('Mit * markierte Felder sind Pflichtfelder.', 'muted required-hint'), bookingForm)
   function renderActions() {
     const bookable = data.windows.some(window => window.slots.some(slot => slot.state === 'free'))
     if (bookable) {
@@ -174,8 +198,8 @@ async function bookingPage(id) {
   app.replaceChildren(heading('Besichtigung buchen', data.object),
     section(node('h2', {}, 'Termin auswählen'),
       para(data.manualCustomerMail
-        ? 'Nach der Buchung sendet Ihnen Andreas Weber eine separate E-Mail mit genauer Adresse und Treffpunkt.'
-        : 'Nach der Buchung erhalten Sie eine separate E-Mail mit Bestätigung, genauer Adresse und Treffpunkt.'), selection),
+        ? 'Nach der Buchung meldet sich Andreas Weber per E-Mail mit den Details zur Besichtigung.'
+        : 'Nach der Buchung erhalten Sie eine Bestätigung per E-Mail.'), selection),
     actions)
 }
 
@@ -248,7 +272,8 @@ function minutes(value) {
 
 function bookingRow(booking) {
   const row = node('li', {}, node('strong', {}, booking.time + ' Uhr'),
-    ' · ' + booking.first + ' ' + booking.last + ' · ' + booking.phone)
+    ' · ' + bookingName(booking) + ' · ' + booking.phone)
+  if (booking.note) row.append(para(booking.note, 'booking-note'))
   if (!booking.manualMail) return row
   const { subject, relativeLink } = booking.manualMail
   const body = relativeLink
@@ -266,6 +291,24 @@ function bookingRow(booking) {
   return row
 }
 
+const bookingName = booking => [booking.first, booking.last].filter(Boolean).join(' ')
+const phoneLink = phone => node('a', { href: 'tel:' + phone.replace(/[^+\d]/g, '') }, phone)
+
+function todayOverview(bookings, today) {
+  const rows = bookings.filter(booking => booking.day === today && booking.status !== 'canceled')
+  const next = rows.find(booking => booking.status === 'upcoming')
+  return section(node('h2', {}, 'Heutige Termine'),
+    rows.length ? node('ul', { className: 'today-bookings' }, rows.map(booking =>
+      node('li', { className: booking === next ? 'next-booking' : '' },
+        node('div', {}, node('strong', {}, booking.time + ' Uhr'),
+          booking === next ? node('span', { className: 'booking-status upcoming' }, 'Als Nächstes') : ''),
+        node('div', {}, node('strong', {}, booking.title),
+          para(bookingName(booking), 'muted'),
+          booking.note ? para(booking.note, 'booking-note') : ''),
+        phoneLink(booking.phone))))
+      : para('Heute sind keine Besichtigungen gebucht.', 'muted'))
+}
+
 function bookingOverview(bookings) {
   const statuses = { upcoming: 'Anstehend', past: 'Vergangen', canceled: 'Abgesagt' }
   const upcoming = bookings.filter(booking => booking.status === 'upcoming')
@@ -279,8 +322,9 @@ function bookingOverview(bookings) {
         node('tbody', {}, rows.map(booking => node('tr', {},
           node('td', {}, node('strong', {}, booking.time + ' Uhr'), node('small', {}, dayLabel(booking.day))),
           node('td', {}, booking.title),
-          node('td', {}, booking.first + ' ' + booking.last),
-          node('td', {}, node('a', { href: 'tel:' + booking.phone.replace(/[^+\d]/g, '') }, booking.phone)),
+          node('td', {}, bookingName(booking),
+            booking.note ? node('small', { className: 'booking-note' }, booking.note) : ''),
+          node('td', {}, phoneLink(booking.phone)),
           node('td', {}, node('span', { className: 'booking-status ' + booking.status }, statuses[booking.status])))))))
     container.setAttribute('aria-label', label)
     container.setAttribute('role', 'region')
@@ -297,7 +341,6 @@ async function adminPage() {
   const data = await api('/api/admin')
   const objectForm = form([
     field('Öffentlicher Objektname ohne Adresse', { name: 'title', maxLength: 120 }),
-    field('Genaue Adresse und Treffpunkt für die Bestätigungsmail', { name: 'meeting', maxLength: 250 }),
   ], 'Objekt anlegen', values => api('/api/admin/objects', values), adminPage)
   const windowForm = form([
     select('Objekt', 'objectId', data.objects.map(object => [object.id, object.title])),
@@ -318,7 +361,7 @@ async function adminPage() {
     }
     const manual = options.length ? node('details', { className: 'admin-window' },
       node('summary', {}, 'Interessenten einbuchen'),
-      form([select('Freier Termin', 'slot', options), ...contactFields(true),
+      form([select('Freier Termin', 'slot', options), ...contactFields(true), noteField(),
         node('input', { type: 'hidden', name: 'waitlistId' })], 'Buchung speichern',
         submitBooking, adminPage)) : null
     const requests = object.waitlist.map(row => {
@@ -344,7 +387,7 @@ async function adminPage() {
       return node('li', {}, node('strong', {}, row.first + ' ' + row.last), ' · ' + row.phone,
         para(row.preference, 'muted'), node('div', { className: 'row-actions' }, use, close), feedback)
     })
-    return section(node('h2', {}, object.title), para(object.meeting, 'muted'),
+    return section(node('h2', {}, object.title), object.meeting ? para(object.meeting, 'muted') : '',
       shareLink(new URL('/buchen/' + object.id, location.origin), 'Buchungslink für Interessenten'),
       ...(manual ? [manual] : []),
       ...(requests.length ? [node('div', { className: 'admin-window' }, node('h3', {}, 'Vormerkungen'),
@@ -355,6 +398,7 @@ async function adminPage() {
           : para('Noch keine Buchungen.', 'muted'))))
   })
   app.replaceChildren(heading('Besichtigungen verwalten'),
+    todayOverview(data.bookingOverview ?? [], data.today),
     ...(data.manualCustomerMail ? [para('Kundenbestätigungen verschickst du selbst aus der jeweiligen Buchung.', 'banner')] : []),
     ...(data.mailConfigured ? (data.pending ? [para(data.pending + ' E-Mail(s) warten auf den Versand.', 'banner')] : [])
       : [para('Benachrichtigungen warten auf die Einrichtung des Mailversands. Fehlende Einstellungen: ' +
