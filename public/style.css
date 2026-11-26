@@ -25,6 +25,7 @@ main { width: min(100% - 2rem, 58rem); margin: 0 auto; padding: 2.4rem 0 2.75rem
 .page-heading { margin: 0 0 1.35rem; }
 h1, h2, h3, p { margin: 0 0 .55rem; }
 h1 { color: var(--accent); font-size: clamp(1.9rem, 6vw, 3rem); font-weight: 650; letter-spacing: -.035em; line-height: 1.14; }
+.booking-heading h1 { font-size: clamp(1.65rem, 4.5vw, 2.25rem); }
 h2 { color: var(--accent); font-size: 1.3rem; letter-spacing: -.02em; }
 h3 { font-size: 1rem; }
 .object-name { font-weight: 650; font-size: 1.1rem; margin-top: .65rem; }
@@ -41,11 +42,9 @@ button:disabled { cursor: default; }
 .primary:hover:not(:disabled) { background: var(--action-dark); }
 .primary:disabled { opacity: .55; }
 .secondary { color: var(--accent); background: #fff; }
-.slot { display: grid; justify-items: start; min-height: 3.5rem; padding: .45rem .6rem; text-align: left; background: #fff; border: 1px solid var(--accent); color: var(--accent); }
-.slot span { font-size: .875rem; }
-.slot:disabled { background: var(--surface-subtle); color: var(--muted); border-color: var(--border); }
-.slot.booked { background: #eaeaea; }
-.slot-edge { grid-column: span 2; color: var(--muted); border-color: var(--border); }
+.slot { display: grid; justify-items: start; min-height: 3.5rem; padding: .45rem .6rem; text-align: left; background: #fff; border: 1px solid var(--accent); border-radius: .55rem; color: var(--accent); }
+.slot span { font-size: .875rem; margin-inline-start: -.16rem; padding-inline: .16rem; }
+.slot.booked span { background: #eaeaea; color: var(--muted); }
 .slot[aria-pressed="true"] { background: var(--accent); color: white; border-color: var(--accent); }
 .slot-legend { display: flex; flex-wrap: wrap; gap: .35rem 1rem; list-style: none; padding: .65rem 0 0; margin: .4rem 0 0; border-top: 1px solid var(--border); font-size: .875rem; color: var(--muted); }
 .slot-legend li { display: flex; align-items: center; gap: .35rem; }
@@ -56,6 +55,10 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 form, label { display: grid; gap: .35rem; }
 form { gap: .85rem; }
 label { font-weight: 650; }
+label[hidden] { display: none; }
+.callback-option { display: flex; gap: .6rem; align-items: baseline; cursor: pointer; }
+.callback-option input { width: auto; flex: 0 0 auto; margin: 0; accent-color: var(--accent); }
+.listing-link { margin-bottom: .85rem; }
 .required-marker { color: var(--accent); }
 .required-hint { font-size: .875rem; margin-bottom: .85rem; }
 input, select, textarea { background: #fff; color: #232127; border: 1px solid #bdb1b4; border-radius: .5rem; min-width: 0; width: 100%; padding: .55rem .65rem; }
@@ -71,6 +74,7 @@ input, select, textarea { background: #fff; color: #232127; border: 1px solid #b
 summary { cursor: pointer; font-weight: 650; }
 details form { margin-top: .8rem; }
 .row-actions { display: flex; gap: .45rem; flex-wrap: wrap; }
+.appointments .row-actions, .window-editor { margin: .55rem 0; }
 .table-scroll { overflow-x: auto; }
 .booking-table { width: 100%; border-collapse: collapse; font-size: .9rem; text-align: left; }
 .booking-table th { color: var(--muted); font-weight: 650; }
@@ -95,7 +99,6 @@ details form { margin-top: .8rem; }
 .broker-about p { color: var(--muted); }
 .broker-about .text-link { font-weight: 650; }
 .broker-contact { align-self: center; }
-.broker-contact h2 { font-size: 1rem; }
 .broker-contact ul { list-style: none; margin: 0; padding: 0; }
 .broker-contact li + li { margin-top: .35rem; }
 .broker-contact a { display: flex; flex-wrap: wrap; gap: .2rem .5rem; color: var(--accent); text-decoration: none; font-size: .875rem; font-weight: 650; }

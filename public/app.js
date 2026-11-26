@@ -75,28 +75,36 @@ function form(fields, label, action, onSuccess, onConflict) {
 
 function picker(windows, current, onPick, selected) {
   if (!windows.length) return para('Derzeit sind keine kommenden Termine eingetragen.', 'muted')
-  const labels = { free: 'Frei', booked: 'Belegt', blocked: 'Nicht verfügbar' }
-  const edge = range => range ? node('div', { className: 'slot booked slot-edge' },
-    node('strong', {}, range.from + '–' + range.to),
-    node('span', {}, 'Belegt · außerhalb des Zeitfensters')) : ''
+  const labels = { free: 'Frei', booked: 'Belegt' }
+  const edge = start => node('div', { className: 'slot booked slot-edge' },
+    node('strong', {}, start),
+    node('span', {}, 'Belegt'))
   const bookable = windows.some(window => window.slots.some(slot =>
     slot.state === 'free' && (window.id !== current?.windowId || slot.at !== current.at)))
-  const days = windows.map(window => {
+  const days = windows.map((window, index) => {
     const range = window.from && window.to ? window.from + '–' + window.to + ' Uhr' : ''
+    const isCurrentSlot = slot => window.id === current?.windowId && slot.at === current.at
     const controls = window.slots.map(slot => {
-      const isCurrent = window.id === current?.windowId && slot.at === current.at
+      const isCurrent = isCurrentSlot(slot)
+      const visibleState = slot.state === 'free' ? 'free' : 'booked'
       const picked = window.id === selected?.windowId && slot.at === selected.at
       const control = button('', () => onPick({ windowId: window.id, at: slot.at, label: dayLabel(window.day) + ', ' + slot.time + ' Uhr' }),
-        'slot ' + slot.state)
-      control.disabled = isCurrent || slot.state !== 'free'
+        'slot ' + visibleState)
+      control.disabled = isCurrent || visibleState !== 'free'
       control.setAttribute('aria-pressed', String(picked))
-      control.append(node('strong', {}, slot.time), node('span', {}, isCurrent ? 'Ihr Termin' : labels[slot.state]))
+      control.append(node('strong', {}, slot.time), node('span', {}, isCurrent ? 'Ihr Termin' : labels[visibleState]))
       return control
     })
+    const start = window.from ? minutes(window.from) : window.slots[0]?.at
+    const leadingSlots = index === 0
+      ? Array.isArray(window.before) ? window.before.map(slot => edge(slot.from))
+        : [start - 2 * window.duration, start - window.duration].filter(at => at >= 0).map(at =>
+          edge([Math.floor(at / 60), at % 60].map(part => String(part).padStart(2, '0')).join(':')))
+      : []
     return node('div', {}, node('h3', {}, dayLabel(window.day)),
       range ? para(range, 'muted duration') : '',
       para('Geplante Termindauer: ' + window.duration + ' Minuten', 'muted duration'),
-      node('div', { className: 'slot-grid' }, edge(window.before), controls, edge(window.after)))
+      node('div', { className: 'slot-grid' }, leadingSlots, controls))
   })
   return node('div', {}, bookable ? '' : para('Derzeit ist kein weiterer Termin buchbar.', 'muted'),
     node('div', { className: 'days' }, days),
@@ -127,8 +135,14 @@ function confirmed(result) {
       ? 'Andreas Weber meldet sich per E-Mail mit den Details zur Besichtigung.'
       : 'Sie erhalten eine Bestätigung per E-Mail.'),
     para('Sie können den Termin bis zwei Stunden vor Beginn absagen oder umbuchen.'),
+    addressLink(result.object.listingUrl),
     node('a', { href: link.href, className: 'text-link cancel-link' }, 'Termin absagen'),
   ))
+}
+
+function addressLink(url) {
+  return url ? node('p', { className: 'listing-link' }, 'Die genaue Adresse erhalten Sie über das Inserat. ',
+    node('a', { href: url, target: '_blank', rel: 'noopener noreferrer', className: 'text-link' }, 'Hier geht’s zur Adresse')) : ''
 }
 
 function contactFields(withEmail) {
@@ -150,57 +164,62 @@ async function bookingPage(id) {
   let data = await api(endpoint)
   let selected
   const selection = node('div')
-  const actions = node('div')
   const selectionText = para('Bitte wählen Sie zuerst einen freien Termin.', 'muted')
-  const bookingForm = form([...contactFields(true), noteField()], 'Termin verbindlich buchen', values => {
+  const callback = node('input', { type: 'checkbox', name: 'callback', onchange: () => {
+    selected = undefined
+    renderPicker(false)
+    renderMode()
+  } })
+  const preference = field('Gewünschte Terminzeit (optional)', { name: 'preference', required: false, maxLength: 250 })
+  const bookingForm = form([
+    node('label', { className: 'callback-option' }, callback, 'Keinen passenden Termin gefunden? Rückruf anfordern'),
+    ...contactFields(true), preference, noteField(),
+  ], 'Termin verbindlich buchen', values => {
+    if (values.callback) return api(endpoint + '/callback', values)
     if (!selected) throw new Error('Bitte wählen Sie zuerst einen freien Termin.')
     return api(endpoint + '/book', { ...values, ...selected })
-  }, confirmed, async () => {
+  }, result => {
+    if (result.manage) return confirmed(result)
+    app.replaceChildren(heading('Rückruf angefragt', data.object),
+      section(para('Andreas Weber meldet sich telefonisch bei Ihnen.')))
+  }, async () => {
     data = await api(endpoint)
     selected = undefined
-    selectionText.textContent = 'Bitte wählen Sie einen neuen Termin.'
     renderPicker(false)
-    renderActions()
+    renderMode()
   })
   const contactSection = section(node('h2', {}, 'Ihre Kontaktdaten'), selectionText,
     para('Mit * markierte Felder sind Pflichtfelder.', 'muted required-hint'), bookingForm)
-  function renderActions() {
+  function renderMode() {
     const bookable = data.windows.some(window => window.slots.some(slot => slot.state === 'free'))
-    if (bookable) {
-      if (actions.firstChild !== contactSection) actions.replaceChildren(contactSection)
-      return
-    }
-    const waitlist = form([
-      ...contactFields(false),
-      field('Wann würde Ihnen ein Termin passen?', { name: 'preference', maxLength: 250,
-        placeholder: 'Zum Beispiel dienstags oder donnerstags ab 16 Uhr' }),
-    ], 'Vormerken lassen', values => api(endpoint + '/waitlist', values), () => {
-      actions.replaceChildren(section(node('h2', {}, 'Vormerkung gespeichert'),
-        para('Sie sind vorgemerkt. Wenn ein Termin passt, melden wir uns telefonisch.')))
-    }, async () => {
-      data = await api(endpoint)
-      renderPicker(false)
-      renderActions()
-    })
-    actions.replaceChildren(section(node('h2', {}, 'Für einen Termin vormerken'),
-      para('Hinterlassen Sie eine Wunschzeit. Wenn ein Termin passt, melden wir uns telefonisch.'), waitlist))
+    selectionText.textContent = callback.checked ? 'Für den Rückruf ist keine Terminwahl erforderlich.'
+      : selected?.label ?? (bookable ? 'Bitte wählen Sie zuerst einen freien Termin.'
+        : 'Aktuell ist kein Termin buchbar. Sie können einen Rückruf anfordern.')
+    preference.hidden = !callback.checked
+    preference.querySelector('input').disabled = !callback.checked
+    bookingForm.querySelector('button[type="submit"]').textContent = callback.checked
+      ? 'Rückruf anfordern' : 'Termin verbindlich buchen'
   }
   function renderPicker(focus) {
     selection.replaceChildren(picker(data.windows, null, slot => {
+      callback.checked = false
       selected = slot
-      selectionText.textContent = slot.label
+      renderMode()
       renderPicker(true)
     }, selected))
     if (focus) selection.querySelector('[aria-pressed="true"]')?.focus()
   }
   renderPicker(false)
-  renderActions()
-  app.replaceChildren(heading('Besichtigung buchen', data.object),
+  renderMode()
+  const bookingHeading = heading('Besichtigung buchen', data.object)
+  bookingHeading.classList.add('booking-heading')
+  app.replaceChildren(bookingHeading,
     section(node('h2', {}, 'Termin auswählen'),
       para(data.manualCustomerMail
         ? 'Nach der Buchung meldet sich Andreas Weber per E-Mail mit den Details zur Besichtigung.'
-        : 'Nach der Buchung erhalten Sie eine Bestätigung per E-Mail.'), selection),
-    actions)
+        : 'Nach der Buchung erhalten Sie eine Bestätigung per E-Mail.'),
+      addressLink(data.object.listingUrl), selection),
+    contactSection)
 }
 
 async function managePage(token) {
@@ -270,10 +289,48 @@ function minutes(value) {
   return hour * 60 + minute
 }
 
+function windowFields(window) {
+  const formatTime = at => [Math.floor(at / 60), at % 60].map(part => String(part).padStart(2, '0')).join(':')
+  const end = window?.end ?? 1080
+  return [
+    field('Datum', { name: 'day', type: 'date', value: window?.day ?? '' }),
+    node('div', { className: 'columns' },
+      field('Von', { name: 'from', type: 'time', step: 900, value: formatTime(window?.start ?? 840) }),
+      field('Bis', end === 1440 ? { name: 'to', type: 'text', maxLength: 5, value: '24:00' }
+        : { name: 'to', type: 'time', step: 900, value: formatTime(end) })),
+    select('Dauer pro Termin', 'duration', [['30', '30 Minuten'], ['45', '45 Minuten']]),
+  ]
+}
+
+function windowData(values) {
+  return { day: values.day, start: minutes(values.from), end: minutes(values.to), duration: Number(values.duration) }
+}
+
+function editWindow(window) {
+  const editor = form(windowFields(window), 'Änderungen speichern',
+    values => api('/api/admin/windows/' + window.id, windowData(values)), adminPage)
+  editor.elements.namedItem('duration').value = String(window.duration)
+  return node('details', { className: 'window-editor' }, node('summary', {}, 'Zeitfenster bearbeiten'), editor)
+}
+
 function bookingRow(booking) {
   const row = node('li', {}, node('strong', {}, booking.time + ' Uhr'),
     ' · ' + bookingName(booking) + ' · ' + booking.phone)
   if (booking.note) row.append(para(booking.note, 'booking-note'))
+  const feedback = status()
+  const cancel = button('Ausbuchen', async () => {
+    if (!confirm(bookingName(booking) + ' um ' + booking.time + ' Uhr ausbuchen?')) return
+    cancel.disabled = true
+    feedback.textContent = ''
+    try {
+      await api('/api/admin/bookings/' + booking.id + '/cancel', {})
+      await adminPage()
+    } catch (error) {
+      feedback.textContent = error.message
+      cancel.disabled = false
+    }
+  }, 'secondary')
+  row.append(node('div', { className: 'row-actions' }, cancel), feedback)
   if (!booking.manualMail) return row
   const { subject, relativeLink } = booking.manualMail
   const body = relativeLink
@@ -341,16 +398,13 @@ async function adminPage() {
   const data = await api('/api/admin')
   const objectForm = form([
     field('Öffentlicher Objektname ohne Adresse', { name: 'title', maxLength: 120 }),
+    field('Inseratslink (optional)', { name: 'listingUrl', type: 'url', required: false, maxLength: 2048 }),
   ], 'Objekt anlegen', values => api('/api/admin/objects', values), adminPage)
   const windowForm = form([
     select('Objekt', 'objectId', data.objects.map(object => [object.id, object.title])),
-    field('Datum', { name: 'day', type: 'date' }),
-    node('div', { className: 'columns' },
-      field('Von', { name: 'from', type: 'time', step: 900, value: '14:00' }),
-      field('Bis', { name: 'to', type: 'time', step: 900, value: '18:00' })),
-    select('Dauer pro Termin', 'duration', [['30', '30 Minuten'], ['45', '45 Minuten']]),
+    ...windowFields(),
   ], 'Zeitfenster anlegen', values => api('/api/admin/windows', {
-    objectId: values.objectId, day: values.day, start: minutes(values.from), end: minutes(values.to), duration: Number(values.duration),
+    objectId: values.objectId, ...windowData(values),
   }), adminPage)
   const objects = data.objects.map(object => {
     const options = object.windows.flatMap(window => window.free.map(slot =>
@@ -364,6 +418,10 @@ async function adminPage() {
       form([select('Freier Termin', 'slot', options), ...contactFields(true), noteField(),
         node('input', { type: 'hidden', name: 'waitlistId' })], 'Buchung speichern',
         submitBooking, adminPage)) : null
+    const listing = node('details', { className: 'window-editor' }, node('summary', {}, 'Inseratslink bearbeiten'),
+      form([field('Inseratslink (optional)', { name: 'listingUrl', type: 'url', required: false,
+        maxLength: 2048, value: object.listing_url ?? '' })], 'Inseratslink speichern',
+        values => api('/api/admin/objects/' + object.id + '/listing', values), adminPage))
     const requests = object.waitlist.map(row => {
       const feedback = status()
       const close = button('Erledigt', async () => {
@@ -379,21 +437,25 @@ async function adminPage() {
       const use = manual ? button('Buchung vorbereiten', () => {
         manual.open = true
         const formElement = manual.querySelector('form')
-        for (const name of ['first', 'last', 'phone']) formElement.elements.namedItem(name).value = row[name]
+        for (const name of ['first', 'last', 'phone', 'email', 'note']) formElement.elements.namedItem(name).value = row[name] ?? ''
         formElement.elements.namedItem('waitlistId').value = row.id
-        formElement.elements.namedItem('email').value = ''
         formElement.elements.namedItem('slot').focus()
       }, 'secondary') : ''
-      return node('li', {}, node('strong', {}, row.first + ' ' + row.last), ' · ' + row.phone,
-        para(row.preference, 'muted'), node('div', { className: 'row-actions' }, use, close), feedback)
+      return node('li', {}, node('strong', {}, bookingName(row)), ' · ', phoneLink(row.phone),
+        row.email ? para(row.email, 'muted') : '',
+        row.preference ? para(row.preference, 'muted') : '',
+        row.note ? para(row.note, 'booking-note') : '',
+        node('div', { className: 'row-actions' }, use, close), feedback)
     })
     return section(node('h2', {}, object.title), object.meeting ? para(object.meeting, 'muted') : '',
       shareLink(new URL('/buchen/' + object.id, location.origin), 'Buchungslink für Interessenten'),
+      listing,
       ...(manual ? [manual] : []),
-      ...(requests.length ? [node('div', { className: 'admin-window' }, node('h3', {}, 'Vormerkungen'),
+      ...(requests.length ? [node('div', { className: 'admin-window' }, node('h3', {}, 'Rückrufanfragen und Vormerkungen'),
         node('ul', { className: 'appointments' }, requests))] : []),
       object.windows.map(window => node('div', { className: 'admin-window' },
         node('h3', {}, dayLabel(window.day)), para(window.range + ' · ' + window.duration + ' Minuten pro Termin', 'muted'),
+        editWindow(window),
         window.bookings.length ? node('ul', { className: 'appointments' }, window.bookings.map(bookingRow))
           : para('Noch keine Buchungen.', 'muted'))))
   })
