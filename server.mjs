@@ -40,7 +40,7 @@ db.exec(`
   );
 `)
 for (const [table, column] of [['bookings', 'email'], ['bookings', 'manual_mail'],
-  ['bookings', 'note'], ['outbox', 'recipient']]) {
+  ['bookings', 'note'], ['outbox', 'recipient'], ['objects', 'listing_url'], ['waitlist', 'email'], ['waitlist', 'note']]) {
   if (!db.prepare(`PRAGMA table_info(${table})`).all().some(entry => entry.name === column)) {
     db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} TEXT`)
   }
@@ -59,7 +59,7 @@ const twoHours = 2 * 60 * 60 * 1000
 const windowById = id => get('SELECT * FROM windows WHERE id = ?', id)
 const objectById = id => get('SELECT * FROM objects WHERE id = ?', id)
 const bookingByToken = token => get('SELECT * FROM bookings WHERE token = ?', tokenHash(token))
-const publicObject = ({ id, title }) => ({ id, title })
+const publicObject = ({ id, title, listing_url }) => ({ id, title, listingUrl: listing_url })
 
 function changeAllowed(day, start) {
   const local = `${day}T${time(start)}:00`
@@ -120,10 +120,10 @@ function availability(objectId, excluded) {
   if (!object) fail(404, 'Dieser Buchungslink ist ungültig.')
   const windows = all('SELECT * FROM windows WHERE object_id = ? ORDER BY day, start', objectId)
     .filter(window => inFuture(window.day, window.end))
-    .map(window => ({
+    .map((window, index) => ({
       id: window.id, day: window.day, duration: window.duration, from: time(window.start), to: time(window.end),
-      before: window.start > 0 ? { from: time(Math.max(0, window.start - 60)), to: time(window.start) } : null,
-      after: window.end < 1440 ? { from: time(window.end), to: time(Math.min(1440, window.end + 30)) } : null,
+      before: index === 0 ? [window.start - 2 * window.duration, window.start - window.duration]
+        .filter(start => start >= 0).map(start => ({ from: time(start), to: time(start + window.duration) })) : [],
       slots: slots(window, excluded, Boolean(excluded), true),
     }))
   return { object: publicObject(object), windows, manualCustomerMail }
@@ -176,7 +176,8 @@ function customerMail(booking, token, moved = false) {
   const subject = moved ? 'Ihr neuer Besichtigungstermin' : 'Ihr Besichtigungstermin ist bestätigt'
   const lines = [
     'Guten Tag ' + [booking.first, booking.last].filter(Boolean).join(' ') + ',', '',
-    object.title, when, meeting ? 'Adresse und Treffpunkt: ' + meeting : 'Den Treffpunkt teile ich Ihnen separat mit.', '',
+    object.title, when, object.listingUrl ? 'Die genaue Adresse erhalten Sie über das Inserat: ' + object.listingUrl
+      : meeting ? 'Adresse und Treffpunkt: ' + meeting : 'Den Treffpunkt teile ich Ihnen separat mit.', '',
     'Sie können bis zwei Stunden vor Beginn umbuchen oder absagen:',
     PUBLIC_ORIGIN ? new URL(managePath, PUBLIC_ORIGIN).href : managePath,
     '', 'Andreas Weber · GARANT Immobilien',
@@ -238,23 +239,47 @@ async function json(req) {
   }
 }
 
-function adminWindow(body) {
+function adminWindow(body, windowId = '') {
   const { day, start, end, duration } = body
   const validDay = typeof day === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(day) &&
     Number.isFinite(Date.parse(day)) && new Date(day).toISOString().slice(0, 10) === day
   if (!validDay || ![30, 45].includes(duration) || ![start, end].every(n => Number.isInteger(n) && n % 15 === 0) ||
-      start < 0 || end > 1440 || end - start < duration || !inFuture(day, start)) {
-    fail(400, 'Bitte wähle ein zukünftiges Zeitfenster im 15-Minuten-Raster mit Platz für mindestens einen Termin.')
+      start < 0 || end > 1440 || end - start < duration) {
+    fail(400, 'Bitte wähle ein Zeitfenster im 15-Minuten-Raster mit Platz für mindestens einen Termin.')
   }
   return transaction(() => {
-    const objectId = String(body.objectId || '')
+    const existing = windowId ? windowById(windowId) : null
+    if (windowId && !existing) fail(404, 'Zeitfenster nicht gefunden.')
+    if ((!existing || day !== existing.day || start !== existing.start) && !inFuture(day, start)) {
+      fail(400, 'Ein neuer Beginn muss in der Zukunft liegen.')
+    }
+    const objectId = existing?.object_id ?? String(body.objectId || '')
     if (!objectById(objectId)) fail(404, 'Objekt nicht gefunden.')
-    if (get('SELECT id FROM windows WHERE object_id = ? AND day = ? AND start < ? AND end > ?', objectId, day, end, start)) {
+    if (get('SELECT id FROM windows WHERE object_id = ? AND day = ? AND start < ? AND end > ? AND id <> ?',
+      objectId, day, end, start, windowId)) {
       fail(409, 'Dieses Objekt hat bereits ein Besichtigungsfenster, das sich mit der gewählten Zeit überschneidet.')
     }
-    run('INSERT INTO windows VALUES (?, ?, ?, ?, ?, ?)', randomUUID(), objectId, day, start, end, duration)
+    if (existing) {
+      const bookings = all('SELECT start, canceled FROM bookings WHERE window_id = ?', windowId)
+      if (bookings.length && (day !== existing.day || duration !== existing.duration)) {
+        fail(409, 'Sobald Buchungen erfasst wurden, bleiben Datum und Termindauer für den Buchungsverlauf erhalten.')
+      }
+      if (bookings.some(booking => !booking.canceled && (booking.start < start || booking.start + duration > end))) {
+        fail(409, 'Eine Buchung liegt außerhalb der neuen Uhrzeiten. Buche den Interessenten bei Bedarf zuerst aus.')
+      }
+      run('UPDATE windows SET day = ?, start = ?, end = ?, duration = ? WHERE id = ?', day, start, end, duration, windowId)
+    } else {
+      run('INSERT INTO windows VALUES (?, ?, ?, ?, ?, ?)', randomUUID(), objectId, day, start, end, duration)
+    }
     return { ok: true }
   })
+}
+
+function cancelBooking(booking) {
+  if (booking.canceled) return
+  run('UPDATE bookings SET canceled = 1, manual_mail = NULL WHERE id = ?', booking.id)
+  booking.canceled = 1
+  notify('Besichtigung abgesagt', booking)
 }
 
 function changeBooking(token, action, body) {
@@ -264,9 +289,7 @@ function changeBooking(token, action, body) {
     const old = details(booking)
     if (!old.editable) fail(409, 'Online-Änderungen sind bis zwei Stunden vor Beginn möglich.')
     if (action === 'cancel') {
-      run('UPDATE bookings SET canceled = 1, manual_mail = NULL WHERE id = ?', booking.id)
-      booking.canceled = 1
-      notify('Besichtigung abgesagt', booking)
+      cancelBooking(booking)
     } else {
       const window = destination(body, old.object.id, booking.id)
       if (window.id !== booking.window_id || body.at !== booking.start) {
@@ -291,17 +314,29 @@ function contact(body, firstRequired = true) {
   return { first, last, phone }
 }
 
+function emailContact(body) {
+  const email = value(body, 'email', 254)
+  if (!/^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/u.test(email)) fail(400, 'Bitte geben Sie eine gültige E-Mail-Adresse ein.')
+  if (body.note != null && (typeof body.note !== 'string' || body.note.length > 500 || body.note.includes('\x00'))) {
+    fail(400, 'Anmerkungen dürfen höchstens 500 Zeichen enthalten.')
+  }
+  return { ...contact(body, false), email, note: body.note?.replace(/\r\n?/g, '\n').trim() || null }
+}
+
+function listingUrl(body) {
+  if (body.listingUrl == null || body.listingUrl === '') return null
+  try {
+    const url = new URL(value(body, 'listingUrl', 2048))
+    if (['https:', 'http:'].includes(url.protocol) && !url.username && !url.password) return url.href
+  } catch {}
+  fail(400, 'Bitte gib einen vollständigen Inseratslink mit https:// oder http:// ein.')
+}
+
 function createBooking(body, objectId, waitlistId) {
   return transaction(() => {
     const window = destination(body, objectId)
     const token = randomBytes(32).toString('base64url')
-    const email = value(body, 'email', 254)
-    if (!/^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/u.test(email)) fail(400, 'Bitte geben Sie eine gültige E-Mail-Adresse ein.')
-    if (body.note != null && (typeof body.note !== 'string' || body.note.length > 500 || body.note.includes('\x00'))) {
-      fail(400, 'Anmerkungen dürfen höchstens 500 Zeichen enthalten.')
-    }
-    const note = body.note?.replace(/\r\n?/g, '\n').trim() || null
-    const booking = { id: randomUUID(), window_id: window.id, start: body.at, ...contact(body, false), email, note }
+    const booking = { id: randomUUID(), window_id: window.id, start: body.at, ...emailContact(body) }
     run('INSERT INTO bookings (id, token, window_id, start, first, last, phone, email, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
       booking.id, tokenHash(token), window.id, body.at, booking.first, booking.last, booking.phone, booking.email, booking.note)
     notify('Neue Besichtigungsbuchung', booking)
@@ -311,18 +346,21 @@ function createBooking(body, objectId, waitlistId) {
   })
 }
 
-function addToWaitlist(body, objectId) {
+function addToWaitlist(body, objectId, callback = false) {
   return transaction(() => {
-    const data = availability(objectId)
-    if (data.windows.some(window => window.slots.some(slot => slot.state === 'free'))) {
+    const object = objectById(objectId)
+    if (!object) fail(404, 'Dieser Buchungslink ist ungültig.')
+    if (!callback && availability(objectId).windows.some(window => window.slots.some(slot => slot.state === 'free'))) {
       fail(409, 'Inzwischen ist ein Termin frei. Bitte prüfen Sie die verfügbaren Termine.')
     }
-    const { first, last, phone } = contact(body)
-    const preference = value(body, 'preference', 250)
-    run('INSERT INTO waitlist (id, object_id, first, last, phone, preference, created) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      randomUUID(), objectId, first, last, phone, preference, Date.now())
-    queueMail('Neue Vormerkung für eine Besichtigung', [data.object.title, first + ' ' + last, 'Telefon: ' + phone,
-      'Gewünschter Termin: ' + preference])
+    const { first, last, phone, email = null, note = null } = callback ? emailContact(body) : contact(body)
+    const preference = callback && !body.preference ? '' : value(body, 'preference', 250)
+    run('INSERT INTO waitlist (id, object_id, first, last, phone, preference, created, email, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      randomUUID(), objectId, first, last, phone, preference, Date.now(), email, note)
+    queueMail(callback ? 'Rückruf zur Besichtigung angefragt' : 'Neue Vormerkung für eine Besichtigung',
+      [object.title, [first, last].filter(Boolean).join(' '), 'Telefon: ' + phone,
+        email && 'E-Mail: ' + email, preference && 'Gewünschter Termin: ' + preference,
+        note && 'Anmerkungen: ' + note].filter(Boolean))
     return { ok: true }
   })
 }
@@ -345,7 +383,7 @@ async function api(req, path) {
       })),
       objects: all('SELECT * FROM objects ORDER BY rowid DESC').map(object => ({
         ...object,
-        waitlist: all('SELECT id, first, last, phone, preference FROM waitlist WHERE object_id = ? AND closed = 0 ORDER BY created', object.id),
+        waitlist: all('SELECT id, first, last, phone, preference, email, note FROM waitlist WHERE object_id = ? AND closed = 0 ORDER BY created', object.id),
         windows: all('SELECT * FROM windows WHERE object_id = ? ORDER BY day, start', object.id).map(window => ({
           ...window, range: `${time(window.start)}–${time(window.end)} Uhr`,
           free: slots(window).filter(slot => slot.state === 'free'),
@@ -370,11 +408,26 @@ async function api(req, path) {
   const body = await json(req)
   if (path === '/api/admin/objects') {
     const meeting = body.meeting ? value(body, 'meeting', 250) : ''
-    run('INSERT INTO objects VALUES (?, ?, ?)', randomUUID(), value(body, 'title', 120), meeting)
+    run('INSERT INTO objects (id, title, meeting, listing_url) VALUES (?, ?, ?, ?)',
+      randomUUID(), value(body, 'title', 120), meeting, listingUrl(body))
+    return { ok: true }
+  }
+  if ((match = path.match(/^\/api\/admin\/objects\/([\w-]+)\/listing$/))) {
+    const result = run('UPDATE objects SET listing_url = ? WHERE id = ?', listingUrl(body), match[1])
+    if (!result.changes) fail(404, 'Objekt nicht gefunden.')
     return { ok: true }
   }
   if (path === '/api/admin/windows') return adminWindow(body)
+  if ((match = path.match(/^\/api\/admin\/windows\/([\w-]+)$/))) return adminWindow(body, match[1])
   if (path === '/api/admin/bookings') return createBooking(body, String(body.objectId || ''), String(body.waitlistId || ''))
+  if ((match = path.match(/^\/api\/admin\/bookings\/([\w-]+)\/cancel$/))) {
+    return transaction(() => {
+      const booking = get('SELECT * FROM bookings WHERE id = ?', match[1])
+      if (!booking) fail(404, 'Buchung nicht gefunden.')
+      cancelBooking(booking)
+      return { ok: true }
+    })
+  }
   if ((match = path.match(/^\/api\/admin\/waitlist\/([\w-]+)\/close$/))) {
     run('UPDATE waitlist SET closed = 1 WHERE id = ?', match[1])
     return { ok: true }
@@ -386,6 +439,7 @@ async function api(req, path) {
     return createBooking(body, match[1])
   }
   if ((match = path.match(/^\/api\/objects\/([\w-]+)\/waitlist$/))) return addToWaitlist(body, match[1])
+  if ((match = path.match(/^\/api\/objects\/([\w-]+)\/callback$/))) return addToWaitlist(body, match[1], true)
   fail(404, 'Seite nicht gefunden.')
 }
 
